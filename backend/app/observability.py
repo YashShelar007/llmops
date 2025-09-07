@@ -1,14 +1,15 @@
-
 """
 Lightweight observability/tracing helpers.
 - JSON logs via structlog
 - Context manager for timing/trace IDs
 - Optional Langfuse hook (disable by default; enable via env)
+- JSONL metrics appender (one row per request)
 """
 from __future__ import annotations
 import os
 import time
 import uuid
+import json
 from contextlib import contextmanager
 import structlog
 
@@ -38,6 +39,18 @@ def init_logging():
             structlog.processors.JSONRenderer(),
         ]
     )
+
+def append_metrics_row(row: dict):
+    """
+    Append a single JSON object to a metrics JSONL file.
+    File path via METRICS_LOG (default: ./metrics.jsonl).
+    """
+    path = os.getenv("METRICS_LOG", "./metrics.jsonl")
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("metrics_write_failed", error=str(e), path=path)
 
 @contextmanager
 def span(operation: str, **fields):
