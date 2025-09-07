@@ -44,16 +44,21 @@ def append_metrics_row(row: dict):
     """
     Append a single JSON object to a metrics JSONL file.
     File path via METRICS_LOG (default: ./metrics.jsonl).
+    Ensures the directory exists first.
     """
     path = os.getenv("METRICS_LOG", "./metrics.jsonl")
     try:
+        dirpath = os.path.dirname(path) or "."
+        os.makedirs(dirpath, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception as e:
         logger.warning("metrics_write_failed", error=str(e), path=path)
 
+from typing import Generator, Dict, Any
+
 @contextmanager
-def span(operation: str, **fields):
+def span(operation: str, **fields) -> Generator[Dict[str, Any], None, None]:
     """
     Context manager that yields a dict you can populate; logs on exit.
     Returns a trace_id for correlation.

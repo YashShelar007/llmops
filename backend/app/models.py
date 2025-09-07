@@ -13,6 +13,7 @@ class TracingInfo(BaseModel):
     latency_ms: int
     token_usage: int | None = None
     cost_usd: float | None = None
+    guardrail: Optional[str] = None
 
 class AnswerResponse(BaseModel):
     answer: str
