@@ -25,6 +25,9 @@ def _mock_completion(prompt: str) -> Dict[str, Any]:
         raise TimeoutError("simulated transient failure (mock)")
 
     q = prompt.lower().strip()
+    if q == "empty":
+        return {"content": "", "tokens_in": 1, "tokens_out": 0, "cost": 0.0}
+
     if "capital of france" in q:
         content = "Paris is the capital of France."
     elif ("sorting algorithm" in q) and ("n log n" in q or "o(n log n)" in q):
