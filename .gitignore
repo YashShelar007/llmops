@@ -26,3 +26,8 @@ yarn-error.log*
 # dotenv
 .env
 .env.*
+
+# metrics & plots
+metrics.jsonl
+data/*.jsonl
+out.png
