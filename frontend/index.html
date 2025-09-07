@@ -38,6 +38,10 @@
         gap: 12px;
         align-items: center;
       }
+      .muted {
+        color: #666;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
@@ -47,6 +51,13 @@
         Enter a prompt and call the FastAPI backend. Shows answer, latency, and
         trace ID.
       </p>
+
+      <p class="muted">
+        Tip: You can open this UI directly at
+        <code>http://localhost:8000/ui/index.html</code> (served by FastAPI) to
+        avoid live-reload flicker.
+      </p>
+
       <textarea id="query" placeholder="Ask something..."></textarea>
       <div class="row">
         <button id="send">Send</button>
@@ -57,26 +68,54 @@
     </div>
 
     <script>
+      const API_BASE = "http://localhost:8000"; // same-origin if you use /ui
       const out = document.getElementById("out");
       const statusEl = document.getElementById("status");
+      const qEl = document.getElementById("query");
+
+      // Restore last response so a reload doesn't wipe it
+      const LAST_KEY = "llmops-starter:last";
+      const last = localStorage.getItem(LAST_KEY);
+      if (last) {
+        try {
+          const obj = JSON.parse(last);
+          if (obj.query) qEl.value = obj.query;
+          if (obj.json) {
+            out.textContent =
+              JSON.stringify(obj.json, null, 2) +
+              (obj.json?.trace?.guardrail
+                ? `\n\n(guardrail: ${obj.json.trace.guardrail})`
+                : "");
+            statusEl.textContent = "restored";
+          }
+        } catch {}
+      }
+
       document.getElementById("send").onclick = async () => {
-        const query = document.getElementById("query").value.trim();
+        const query = qEl.value.trim();
         if (!query) {
           alert("Please enter a query.");
           return;
         }
 
         statusEl.textContent = "Calling /answer...";
-        out.textContent = "(waiting)";
+        // Keep previous output visible; do not overwrite with (waiting)
+
         try {
-          const res = await fetch("http://localhost:8000/answer", {
+          const res = await fetch(`${API_BASE}/answer`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ query }),
           });
           const json = await res.json();
           statusEl.textContent = res.ok ? "OK" : `Error ${res.status}`;
-          out.textContent = JSON.stringify(json, null, 2);
+          out.textContent =
+            JSON.stringify(json, null, 2) +
+            (json?.trace?.guardrail
+              ? `\n\n(guardrail: ${json.trace.guardrail})`
+              : "");
+          // Persist so auto-reloads (if any) restore immediately
+          localStorage.setItem(LAST_KEY, JSON.stringify({ query, json }));
         } catch (e) {
           statusEl.textContent = "Network error";
           out.textContent = String(e);
