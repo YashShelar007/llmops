@@ -5,13 +5,14 @@ services:
       dockerfile: backend/Dockerfile
     ports:
       - "8000:8000"
+    # Load local .env (gitignored) so LANGFUSE_* and others are available
+    env_file:
+      - ../.env
     environment:
-      # LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      # LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
-      # LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
-      LLM_PROVIDER: mock
-      TIMEOUT_SECONDS: 8
-      MAX_RETRIES: 2
+      # App defaults; secrets still come from .env
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      TIMEOUT_SECONDS: ${TIMEOUT_SECONDS:-8}
+      MAX_RETRIES: ${MAX_RETRIES:-2}
       METRICS_LOG: /data/metrics.jsonl
     volumes:
       - ../data:/data
