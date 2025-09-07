@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install backend requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Start API
+        env:
+          METRICS_LOG: data/metrics.jsonl
+        run: |
+          mkdir -p data
+          nohup uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 > server.log 2>&1 &
+
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sSf http://127.0.0.1:8000/health > /dev/null; then
+              echo "API is up"; exit 0;
+            fi
+            sleep 1
+          done
+          echo "API failed to start"; echo "--- server.log ---"; cat server.log; exit 1
+
+      - name: Run eval harness
+        run: |
+          python eval/harness.py | tee eval_output.txt
+
+      - name: Fail on regression (any FAIL lines)
+        run: |
+          if grep -q 'FAIL' eval_output.txt; then
+            echo "Regression detected:"; cat eval_output.txt; exit 1;
+          fi
+
+      - name: Upload artifacts (metrics, eval, logs)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-artifacts
+          path: |
+            data/metrics.jsonl
+            eval_output.txt
+            server.log
