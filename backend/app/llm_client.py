@@ -1,24 +1,30 @@
-
 """
 LLM client abstraction.
-- By default: deterministic mock for portability.
-- Swap in a real provider (OpenAI/Anthropic/etc.) with env config.
+- Default: deterministic mock for portability.
+- Adds timeout + bounded retries with jitter.
+- Optional test flag LLM_MOCK_FAIL_FIRST=true to simulate a transient failure.
 """
 from __future__ import annotations
-import os
-import math
+import os, math, random, time
 from typing import Dict, Any
 
 PROVIDER = os.getenv("LLM_PROVIDER", "mock")
+TIMEOUT_SECONDS = float(os.getenv("TIMEOUT_SECONDS", "8"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+MOCK_FAIL_FIRST = os.getenv("LLM_MOCK_FAIL_FIRST", "false").lower() == "true"
+_failed_once = False  # stateful within process to simulate one transient failure
 
 def _estimate_tokens(text: str) -> int:
-    # naive token estimate: 1 token ~ 4 chars (rough approximation)
     return max(1, math.ceil(len(text) / 4))
 
 def _mock_completion(prompt: str) -> Dict[str, Any]:
-    # Small rule-based answers so eval passes; keeps deterministic behavior.
-    q = prompt.lower().strip()
+    global _failed_once
+    # Simulate a transient failure on first call if enabled
+    if MOCK_FAIL_FIRST and not _failed_once:
+        _failed_once = True
+        raise TimeoutError("simulated transient failure (mock)")
 
+    q = prompt.lower().strip()
     if "capital of france" in q:
         content = "Paris is the capital of France."
     elif ("sorting algorithm" in q) and ("n log n" in q or "o(n log n)" in q):
@@ -30,25 +36,33 @@ def _mock_completion(prompt: str) -> Dict[str, Any]:
 
     tokens_in = _estimate_tokens(prompt)
     tokens_out = _estimate_tokens(content)
-    cost = 0.2 * (tokens_in + tokens_out) / 1000.0  # illustrative cost model
+    cost = 0.2 * (tokens_in + tokens_out) / 1000.0  # illustrative
     return {"content": content, "tokens_in": tokens_in, "tokens_out": tokens_out, "cost": cost}
 
-
-def complete(prompt: str) -> Dict[str, Any]:
+def _complete_once(prompt: str, timeout_s: float) -> Dict[str, Any]:
+    # For real SDKs you would honor timeout_s (client options / httpx timeout).
     if PROVIDER == "mock":
         return _mock_completion(prompt)
-    # Example (commented): use real SDKs when env is set up
     # elif PROVIDER == "openai":
-    #     from openai import OpenAI
-    #     client = OpenAI()
-    #     resp = client.chat.completions.create(
-    #         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-    #         messages=[{"role":"user","content":prompt}],
-    #     )
-    #     text = resp.choices[0].message.content
-    #     usage = resp.usage
-    #     cost = _estimate_cost_openai(usage)  # implement if needed
-    #     return {"content": text, "tokens_in": usage.prompt_tokens, "tokens_out": usage.completion_tokens, "cost": cost}
-    else:
-        # fallback to mock
-        return _mock_completion(prompt)
+    #     ...
+    return _mock_completion(prompt)
+
+def complete(prompt: str, timeout_s: float | None = None, max_retries: int | None = None) -> Dict[str, Any]:
+    """
+    Call provider with bounded retries + jitter.
+    """
+    timeout_s = timeout_s or TIMEOUT_SECONDS
+    attempts = (max_retries if max_retries is not None else MAX_RETRIES) + 1  # first try + retries
+    backoff = 0.35
+
+    for i in range(attempts):
+        try:
+            return _complete_once(prompt, timeout_s)
+        except Exception as e:
+            last = (i == attempts - 1)
+            if last:
+                raise
+            # jittered backoff
+            sleep_for = backoff * (1.0 + random.random())
+            time.sleep(sleep_for)
+            backoff *= 1.8
