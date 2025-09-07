@@ -1,0 +1,11 @@
+
+# Minimal golden set (expand as needed)
+- id: 1
+  query: "What is the capital of France?"
+  must_include: ["Paris"]
+- id: 2
+  query: "Name a sorting algorithm with O(n log n) average complexity."
+  must_include: ["merge", "quick"]  # accept either as signal
+- id: 3
+  query: "Explain what an API is in one sentence."
+  must_include: ["interface", "software"]
