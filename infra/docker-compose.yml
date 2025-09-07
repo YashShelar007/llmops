@@ -1,0 +1,15 @@
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Uncomment and set these to enable Langfuse
+      # LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      # LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      # LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LLM_PROVIDER: mock
+    restart: unless-stopped
