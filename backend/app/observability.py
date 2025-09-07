@@ -1,35 +1,47 @@
 """
-Lightweight observability/tracing helpers.
+Lightweight observability/tracing helpers (Langfuse v3 compatible).
 - JSON logs via structlog
 - Context manager for timing/trace IDs
-- Optional Langfuse hook (disable by default; enable via env)
+- Optional Langfuse hook (enable via env: LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST)
 - JSONL metrics appender (one row per request)
 """
 from __future__ import annotations
+
+import json
 import os
 import time
 import uuid
-import json
 from contextlib import contextmanager
+from typing import Any, Dict, Generator
+
 import structlog
 
 logger = structlog.get_logger()
 
-USE_LANGFUSE = bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+# ---- Langfuse (v3) client wiring -------------------------------------------
+USE_LANGFUSE = bool(
+    os.getenv("LANGFUSE_PUBLIC_KEY")
+    and os.getenv("LANGFUSE_SECRET_KEY")
+    and os.getenv("LANGFUSE_HOST")
+)
+
+_langfuse = None
 if USE_LANGFUSE:
     try:
-        from langfuse import Langfuse
-        _langfuse = Langfuse(
-            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-            host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
-        )
+        # v3 style: get_client() picks up env vars
+        from langfuse import get_client
+        _langfuse = get_client()
     except Exception as e:
         logger.warning("langfuse_import_failed", error=str(e))
         _langfuse = None
-else:
-    _langfuse = None
 
+# Current OTel span accessor (Langfuse v3 uses OpenTelemetry under the hood)
+try:
+    from opentelemetry.trace import get_current_span
+except Exception:
+    get_current_span = None  # gracefully degrade
+
+# ---- logging & metrics -------------------------------------------------------
 def init_logging():
     structlog.configure(
         processors=[
@@ -43,8 +55,7 @@ def init_logging():
 def append_metrics_row(row: dict):
     """
     Append a single JSON object to a metrics JSONL file.
-    File path via METRICS_LOG (default: ./metrics.jsonl).
-    Ensures the directory exists first.
+    Path via METRICS_LOG (default: ./metrics.jsonl). Ensures directory exists.
     """
     path = os.getenv("METRICS_LOG", "./metrics.jsonl")
     try:
@@ -55,36 +66,75 @@ def append_metrics_row(row: dict):
     except Exception as e:
         logger.warning("metrics_write_failed", error=str(e), path=path)
 
-from typing import Generator, Dict, Any
-
+# ---- span helper -------------------------------------------------------------
 @contextmanager
 def span(operation: str, **fields) -> Generator[Dict[str, Any], None, None]:
     """
-    Context manager that yields a dict you can populate; logs on exit.
-    Returns a trace_id for correlation.
+    Yields a ctx dict containing:
+      - trace_id: app-level UUID
+      - lf_trace_id: OTel trace id (32-hex) if Langfuse enabled
+      - set_output(obj): call inside the with-block to send 'output' to Langfuse
     """
     trace_id = str(uuid.uuid4())
     start = time.perf_counter()
     event = {"trace_id": trace_id, "operation": operation}
     event.update(fields)
 
-    lf_span = None
+    lf_cm = None
+    lf_obs = None
+    lf_trace_id = None
+    _out_holder = {"output": None}
+
+    def set_output(obj: Any) -> None:
+        _out_holder["output"] = obj
+        # If we already have a Langfuse span, push it immediately so it shows up
+        # even if something crashes later.
+        if lf_obs is not None:
+            try:
+                lf_obs.update(output=obj)
+            except Exception as e:
+                logger.warning("langfuse_update_failed", error=str(e))
+
     if _langfuse:
         try:
-            lf_span = _langfuse.trace(name=operation, metadata=fields)
+            lf_cm = _langfuse.start_as_current_span(name=operation, input=fields)
+            lf_obs = lf_cm.__enter__()  # enter context
+            # Pull OTel trace id for the response payload
+            if get_current_span:
+                try:
+                    span_obj = get_current_span()
+                    ctx = span_obj.get_span_context()
+                    if ctx and getattr(ctx, "trace_id", 0):
+                        lf_trace_id = f"{ctx.trace_id:032x}"
+                except Exception as e:
+                    logger.warning("otel_trace_id_failed", error=str(e))
         except Exception as e:
             logger.warning("langfuse_trace_start_failed", error=str(e))
 
     try:
-        yield {"trace_id": trace_id, "start": start, "fields": fields}
+        yield {
+            "trace_id": trace_id,
+            "start": start,
+            "fields": fields,
+            "lf_trace_id": lf_trace_id,
+            "set_output": set_output,
+        }
     finally:
         duration_ms = int((time.perf_counter() - start) * 1000)
         event["duration_ms"] = duration_ms
 
-        if lf_span:
+        # Ensure latest output is saved before closing
+        if lf_obs and _out_holder["output"] is not None:
             try:
-                lf_span.update(metadata={"duration_ms": duration_ms, **fields})
+                lf_obs.update(output=_out_holder["output"])
             except Exception as e:
-                logger.warning("langfuse_trace_update_failed", error=str(e))
+                logger.warning("langfuse_update_failed_final", error=str(e))
 
-        logger.info("span", **event)
+        if lf_cm:
+            try:
+                lf_cm.__exit__(None, None, None)
+                _langfuse.flush()
+            except Exception as e:
+                logger.warning("langfuse_trace_end_failed", error=str(e))
+
+        logger.info("span", **event, lf_trace_id=lf_trace_id)
