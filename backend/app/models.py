@@ -14,6 +14,7 @@ class TracingInfo(BaseModel):
     token_usage: int | None = None
     cost_usd: float | None = None
     guardrail: Optional[str] = None
+    lf_trace_id: Optional[str] = None
 
 class AnswerResponse(BaseModel):
     answer: str

@@ -9,7 +9,7 @@ from .observability import init_logging, span, logger, append_metrics_row
 from . import llm_client
 
 init_logging()
-app = FastAPI(title="LLMOps Starter API", version="0.3.0")
+app = FastAPI(title="LLMOps Starter API", version="0.3.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the frontend from /ui so you don't need Live Server (prevents auto reload flicker)
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="ui")
@@ -32,14 +31,9 @@ def health():
     return {"status": "ok"}
 
 def _is_valid_answer(text: str) -> bool:
-    # simple sanity checks; extend with stricter rules or schemas if needed
-    if not text or not text.strip():
-        return False
-    if len(text.strip()) < 3:
-        return False
-    return True
+    return bool(text and text.strip() and len(text.strip()) >= 3)
 
-def _fallback_answer(prompt: str) -> str:
+def _fallback_answer(_: str) -> str:
     return ("I'm not confident enough to answer precisely right now. "
             "Could you rephrase or provide a bit more context?")
 
@@ -60,14 +54,12 @@ def answer(body: AnswerRequest, request: Request):
             result = llm_client.complete(body.query, timeout_s=TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
             text = result.get("content", "")
 
-            # Guardrail pass #1: invalid → try trimmed prompt
             if not _is_valid_answer(text):
                 trimmed = body.query[:200]
                 result = llm_client.complete(trimmed, timeout_s=TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
                 text = result.get("content", "")
                 guardrail_mode = "trimmed"
 
-            # Guardrail pass #2: still invalid → safe fallback
             if not _is_valid_answer(text):
                 text = _fallback_answer(body.query)
                 guardrail_mode = "fallback"
@@ -75,6 +67,11 @@ def answer(body: AnswerRequest, request: Request):
             latency_ms = int((time.perf_counter() - start) * 1000)
             tokens = (result.get("tokens_in", 0) + result.get("tokens_out", 0))
             cost = result.get("cost")
+            lf_id = ctx.get("lf_trace_id")
+
+            # <-- push output to Langfuse (v3)
+            if callable(ctx.get("set_output")):
+                ctx["set_output"]({"answer": text, "guardrail": guardrail_mode})
 
             trace = TracingInfo(
                 request_id=ctx["trace_id"],
@@ -82,12 +79,14 @@ def answer(body: AnswerRequest, request: Request):
                 token_usage=tokens,
                 cost_usd=cost,
                 guardrail=guardrail_mode,
+                lf_trace_id=lf_id,
             )
             response = AnswerResponse(answer=text, trace=trace)
 
             logger.info(
                 "answer_success",
                 trace_id=ctx["trace_id"],
+                lf_trace_id=lf_id,
                 user_id=user_id,
                 client_host=client_host,
                 latency_ms=latency_ms,
@@ -107,6 +106,7 @@ def answer(body: AnswerRequest, request: Request):
                 "cost_usd": cost,
                 "query_len": query_len,
                 "guardrail": guardrail_mode,
+                "lf_trace_id": lf_id,
             })
 
             return response
@@ -114,13 +114,16 @@ def answer(body: AnswerRequest, request: Request):
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
             logger.error("answer_error", error=str(e), latency_ms=latency_ms, trace_id=ctx["trace_id"])
-            # Safe fallback on provider exception
+            # Also emit output to Langfuse for failed path
+            if callable(ctx.get("set_output")):
+                ctx["set_output"]({"error": str(e), "guardrail": "fallback"})
             trace = TracingInfo(
                 request_id=ctx["trace_id"],
                 latency_ms=latency_ms,
                 token_usage=None,
                 cost_usd=None,
                 guardrail="fallback",
+                lf_trace_id=ctx.get("lf_trace_id"),
             )
             return AnswerResponse(answer=_fallback_answer(body.query), trace=trace)
 
