@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -38,8 +39,17 @@ jobs:
       - name: Start API
         env:
           METRICS_LOG: data/metrics.jsonl
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: https://us.cloud.langfuse.com
+          LLM_PROVIDER: mock
         run: |
           mkdir -p data
+          if [ -n "${LANGFUSE_PUBLIC_KEY:-}" ] && [ -n "${LANGFUSE_SECRET_KEY:-}" ]; then
+            echo "Langfuse: enabled in CI"
+          else
+            echo "Langfuse: disabled in CI (no secrets)"
+          fi
           nohup uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 > server.log 2>&1 &
 
       - name: Wait for /health

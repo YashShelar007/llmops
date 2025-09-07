@@ -7,6 +7,6 @@ python-dotenv>=1.0.1
 structlog>=24.1.0
 PyYAML>=6.0.1
 matplotlib>=3.8.0
+langfuse>=2.43.1
 # Optional: enable when using real Langfuse + provider SDKs
-# langfuse>=2.43.1
 # openai>=1.43.0
