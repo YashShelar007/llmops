@@ -1,9 +1,10 @@
+# backend/app/observability.py
 """
-Lightweight observability/tracing helpers (Langfuse v3 compatible).
+Langfuse v3-compatible observability helpers.
 - JSON logs via structlog
 - Context manager for timing/trace IDs
 - Optional Langfuse hook (enable via env: LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST)
-- JSONL metrics appender (one row per request)
+- Metrics JSONL writer (defaults to /tmp on Lambda, with fallback)
 """
 from __future__ import annotations
 
@@ -15,22 +16,25 @@ from contextlib import contextmanager
 from typing import Any, Dict, Generator
 
 import structlog
+from . import ensure_env_from_ssm  # expects helper in app __init__.py (or similar)
 
 logger = structlog.get_logger()
 
-# ---- Langfuse (v3) client wiring -------------------------------------------
-USE_LANGFUSE = bool(
-    os.getenv("LANGFUSE_PUBLIC_KEY")
-    and os.getenv("LANGFUSE_SECRET_KEY")
-    and os.getenv("LANGFUSE_HOST")
-)
+# Make metrics writable on Lambda by default
+DEFAULT_METRICS = "/tmp/metrics.jsonl" if os.getenv("AWS_LAMBDA_FUNCTION_NAME") else "./metrics.jsonl"
 
+# Hydrate Langfuse env from SSM if present
+ensure_env_from_ssm("LANGFUSE_PUBLIC_KEY", "SSM_LANGFUSE_PUBLIC_KEY", decrypt=True)
+ensure_env_from_ssm("LANGFUSE_SECRET_KEY", "SSM_LANGFUSE_SECRET_KEY", decrypt=True)
+ensure_env_from_ssm("LANGFUSE_HOST",       "SSM_LANGFUSE_HOST",       decrypt=False)
+
+# ---- Langfuse (v3) client wiring -------------------------------------------
+USE_LANGFUSE = all(os.getenv(k) for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"))
 _langfuse = None
 if USE_LANGFUSE:
     try:
-        # v3 style: get_client() picks up env vars
         from langfuse import get_client
-        _langfuse = get_client()
+        _langfuse = get_client()  # picks up env vars
     except Exception as e:
         logger.warning("langfuse_import_failed", error=str(e))
         _langfuse = None
@@ -55,10 +59,10 @@ def init_logging():
 def append_metrics_row(row: dict):
     """
     Append a single JSON object to a metrics JSONL file.
-    Path via METRICS_LOG (default: ./metrics.jsonl). Ensures directory exists.
+    Path via METRICS_LOG (default: DEFAULT_METRICS). Ensures directory exists.
     Falls back to /tmp/metrics.jsonl on read-only FS (Lambda).
     """
-    path = os.getenv("METRICS_LOG", "./metrics.jsonl")
+    path = os.getenv("METRICS_LOG", DEFAULT_METRICS)
 
     def _write(p: str):
         dirpath = os.path.dirname(p) or "."
@@ -102,9 +106,8 @@ def span(operation: str, **fields) -> Generator[Dict[str, Any], None, None]:
 
     def set_output(obj: Any) -> None:
         _out_holder["output"] = obj
-        # If we already have a Langfuse span, push it immediately so it shows up
-        # even if something crashes later.
-        if lf_obs is not None:
+        # Push immediately so Output shows even if something fails later
+        if lf_obs is not None and hasattr(lf_obs, "update"):
             try:
                 lf_obs.update(output=obj)
             except Exception as e:
@@ -139,7 +142,7 @@ def span(operation: str, **fields) -> Generator[Dict[str, Any], None, None]:
         event["duration_ms"] = duration_ms
 
         # Ensure latest output is saved before closing
-        if lf_obs and _out_holder["output"] is not None:
+        if lf_obs and _out_holder["output"] is not None and hasattr(lf_obs, "update"):
             try:
                 lf_obs.update(output=_out_holder["output"])
             except Exception as e:
@@ -148,7 +151,11 @@ def span(operation: str, **fields) -> Generator[Dict[str, Any], None, None]:
         if lf_cm:
             try:
                 lf_cm.__exit__(None, None, None)
-                _langfuse.flush()
+                # optional but helpful in dev/short runs
+                try:
+                    _langfuse.flush()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning("langfuse_trace_end_failed", error=str(e))
 

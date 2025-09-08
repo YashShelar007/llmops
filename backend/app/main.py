@@ -1,12 +1,13 @@
 from __future__ import annotations
 import os, time, json
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from .models import AnswerRequest, AnswerResponse, TracingInfo
 from .observability import init_logging, span, logger, append_metrics_row
 from . import llm_client
+from . import ensure_env_from_ssm
 
 init_logging()
 app = FastAPI(title="LLMOps Starter API", version="0.3.2")
@@ -25,6 +26,8 @@ if FRONTEND_DIR.exists():
 
 TIMEOUT_SECONDS = float(os.getenv("TIMEOUT_SECONDS", "8"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+ensure_env_from_ssm("DEMO_API_KEY", "SSM_DEMO_API_KEY", decrypt=True)
+DEMO_API_KEY = os.getenv("DEMO_API_KEY")
 
 @app.get("/health")
 def health():
@@ -37,8 +40,14 @@ def _fallback_answer(_: str) -> str:
     return ("I'm not confident enough to answer precisely right now. "
             "Could you rephrase or provide a bit more context?")
 
+
+
 @app.post("/answer", response_model=AnswerResponse)
-def answer(body: AnswerRequest, request: Request):
+def answer(body: AnswerRequest, request: Request, x_api_key: str | None = Header(default=None)):
+    # Simple header auth (skip if not configured)
+    if DEMO_API_KEY and x_api_key != DEMO_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query must be non-empty")
 
