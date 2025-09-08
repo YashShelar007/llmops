@@ -1,0 +1,23 @@
+name: deploy-ui
+on:
+  workflow_dispatch: {}
+permissions:
+  id-token: write
+  contents: read
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  UI_BUCKET: ${{ vars.UI_BUCKET }}
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload frontend
+        run: |
+          aws s3 sync frontend/ "s3://${UI_BUCKET}/" --delete --cache-control "max-age=60"
+          echo "UI at: http://${UI_BUCKET}.s3-website-${AWS_REGION}.amazonaws.com"

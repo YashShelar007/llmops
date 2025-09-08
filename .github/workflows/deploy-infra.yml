@@ -1,0 +1,51 @@
+name: deploy-infra
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ECR image tag to deploy (defaults to sha-<commit>)"
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REPO: ${{ vars.ECR_REPO }}
+  ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+  IMAGE_TAG: ${{ inputs.image_tag || format('sha-{0}', github.sha) }}
+  ARCH: x86_64
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: prod # add required reviewers in repo settings for safety
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Resolve image digest
+        id: digest
+        run: |
+          DIGEST=$(aws ecr describe-images --repository-name "${ECR_REPO}" \
+            --query "imageDetails[?contains(imageTags, '${IMAGE_TAG}')]|[0].imageDigest" \
+            --output text --region "${AWS_REGION}")
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ] || [ "$DIGEST" = "null" ]; then
+            echo "No digest found for tag ${IMAGE_TAG}"; exit 1
+          fi
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+      - name: Terraform apply
+        working-directory: infra/terraform
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}@${{ steps.digest.outputs.digest }}"
+          terraform init -input=false
+          terraform apply -auto-approve \
+            -var "region=${AWS_REGION}" \
+            -var "image_uri=${IMAGE_URI}" \
+            -var "architecture=${ARCH}" \
+            -var "otel_service_name=llmops-starter-api" \
+            -var "otel_resource_attributes=service.version=0.3.2,deployment.environment=prod"

@@ -1,14 +1,26 @@
 provider "aws" { region = var.region }
 
+# Allow Lambda to read SSM params (SecureString) encrypted with AWS-managed SSM key
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
+
+# Allow bucket policies that make an S3 website public (account-wide).
+# Keeps ACL blocks on; only unblocks public policies & restrict_public_buckets.
+resource "aws_s3_account_public_access_block" "allow_website" {
+  account_id               = data.aws_caller_identity.current.account_id
+  block_public_acls        = true
+  ignore_public_acls       = true
+  block_public_policy      = false
+  restrict_public_buckets  = false
+}
+
 # Basic logs for Lambda
 resource "aws_cloudwatch_log_group" "fn" {
   name              = "/aws/lambda/${var.function_name}"
   retention_in_days = var.log_retention_days
 }
 
-# Allow Lambda to read SSM params (SecureString) encrypted with AWS-managed SSM key
-data "aws_caller_identity" "current" {}
-data "aws_partition" "current" {}
+
 
 # Policy to read only our namespace (least privilege)
 data "aws_iam_policy_document" "ssm_access" {
@@ -122,7 +134,14 @@ resource "aws_lambda_function" "fn" {
 resource "aws_apigatewayv2_api" "http" {
   name          = "${var.function_name}-http"
   protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = ["*"]                 
+    allow_methods = ["POST", "OPTIONS"]
+    allow_headers = ["content-type", "x-api-key"]
+  }
 }
+
 
 resource "aws_apigatewayv2_integration" "lambda" {
   api_id                 = aws_apigatewayv2_api.http.id
@@ -150,4 +169,49 @@ resource "aws_lambda_permission" "allow_apigw" {
   function_name = aws_lambda_function.fn.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+}
+
+# --- S3 website for frontend (public demo) ---
+resource "aws_s3_bucket" "ui" {
+  bucket = "${var.function_name}-ui"
+  depends_on = [aws_s3_account_public_access_block.allow_website]
+}
+
+resource "aws_s3_bucket_public_access_block" "ui" {
+  bucket                  = aws_s3_bucket.ui.id
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+  depends_on              = [aws_s3_account_public_access_block.allow_website]
+}
+
+resource "aws_s3_bucket_website_configuration" "ui" {
+  bucket = aws_s3_bucket.ui.bucket
+  index_document {
+    suffix = "index.html"
+  }
+}
+
+data "aws_iam_policy_document" "ui_public" {
+  statement {
+    sid     = "AllowPublicRead"
+    effect  = "Allow"
+    actions = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.ui.arn}/*"]
+    principals { 
+      type = "AWS"
+      identifiers = ["*"] 
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "ui" {
+  bucket     = aws_s3_bucket.ui.id
+  policy     = data.aws_iam_policy_document.ui_public.json
+  depends_on = [aws_s3_account_public_access_block.allow_website]
+}
+
+output "ui_website_url" {
+  value = aws_s3_bucket_website_configuration.ui.website_endpoint
 }
