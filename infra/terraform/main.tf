@@ -111,9 +111,9 @@ resource "aws_lambda_function" "fn" {
         OTEL_RESOURCE_ATTRIBUTES = var.otel_resource_attributes
 
         # OpenAI
-        OPENAI_API_KEY     = var.openai_api_key
-        OPENAI_MODEL       = var.openai_model
-        OPENAI_MAX_TOKENS  = tostring(var.openai_max_tokens)
+        # OPENAI_API_KEY     = var.openai_api_key
+        # OPENAI_MODEL       = var.openai_model
+        # OPENAI_MAX_TOKENS  = tostring(var.openai_max_tokens)
 
         METRICS_LOG        = var.metrics_log
       },
@@ -200,7 +200,7 @@ data "aws_iam_policy_document" "ui_public" {
     actions = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.ui.arn}/*"]
     principals { 
-      type = "AWS"
+      type = "*"
       identifiers = ["*"] 
     }
   }

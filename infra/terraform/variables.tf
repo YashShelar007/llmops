@@ -28,6 +28,7 @@ variable "log_retention_days" {
 variable "openai_api_key" {
   type      = string
   sensitive = true
+  default   = ""
 }
 
 variable "openai_model" {
