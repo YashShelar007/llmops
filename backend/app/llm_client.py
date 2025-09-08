@@ -14,6 +14,26 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MOCK_FAIL_FIRST = os.getenv("LLM_MOCK_FAIL_FIRST", "false").lower() == "true"
 _failed_once = False  # stateful within process to simulate one transient failure
 
+# OpenAI client (v1)
+try:
+    from openai import OpenAI  # pip install openai>=1.45
+    _has_openai = True
+except Exception:
+    _has_openai = False
+
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "300"))
+
+# rough price map (USD / 1K tokens). Adjust if you switch models.
+_PRICE = {
+    "gpt-4o-mini": {"in": 0.00015, "out": 0.0006},
+    # add more if you use them…
+}
+
+def _price_for(model: str, tokens_in: int, tokens_out: int) -> float:
+    p = _PRICE.get(model, {"in": 0.0, "out": 0.0})
+    return (tokens_in * p["in"] + tokens_out * p["out"]) / 1000.0
+
 def _estimate_tokens(text: str) -> int:
     return max(1, math.ceil(len(text) / 4))
 
@@ -43,12 +63,33 @@ def _mock_completion(prompt: str) -> Dict[str, Any]:
     return {"content": content, "tokens_in": tokens_in, "tokens_out": tokens_out, "cost": cost}
 
 def _complete_once(prompt: str, timeout_s: float) -> Dict[str, Any]:
-    # For real SDKs you would honor timeout_s (client options / httpx timeout).
     if PROVIDER == "mock":
         return _mock_completion(prompt)
-    # elif PROVIDER == "openai":
-    #     ...
+
+    if PROVIDER == "openai":
+        if not _has_openai:
+            raise RuntimeError("openai package not installed")
+        client = OpenAI()  # reads OPENAI_API_KEY from env
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=OPENAI_MAX_TOKENS,
+            temperature=0.2,
+        )
+        content = resp.choices[0].message.content or ""
+        # usage is present on paid models
+        t_in = getattr(resp, "usage", None).prompt_tokens if getattr(resp, "usage", None) else len(prompt) // 4
+        t_out = getattr(resp, "usage", None).completion_tokens if getattr(resp, "usage", None) else len(content) // 4
+        return {
+            "content": content,
+            "tokens_in": int(t_in),
+            "tokens_out": int(t_out),
+            "cost": _price_for(OPENAI_MODEL, int(t_in), int(t_out)),
+        }
+
+    # default fallback stays as mock
     return _mock_completion(prompt)
+
 
 def complete(prompt: str, timeout_s: float | None = None, max_retries: int | None = None) -> Dict[str, Any]:
     """

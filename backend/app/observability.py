@@ -56,14 +56,29 @@ def append_metrics_row(row: dict):
     """
     Append a single JSON object to a metrics JSONL file.
     Path via METRICS_LOG (default: ./metrics.jsonl). Ensures directory exists.
+    Falls back to /tmp/metrics.jsonl on read-only FS (Lambda).
     """
     path = os.getenv("METRICS_LOG", "./metrics.jsonl")
-    try:
-        dirpath = os.path.dirname(path) or "."
+
+    def _write(p: str):
+        dirpath = os.path.dirname(p) or "."
         os.makedirs(dirpath, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
+        with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception as e:
+
+    try:
+        _write(path)
+    except OSError as e:
+        # 30: Read-only file system, 13: Permission denied
+        if e.errno in (30, 13):
+            fallback = "/tmp/metrics.jsonl"
+            try:
+                _write(fallback)
+                logger.info("metrics_write_fallback", from_path=path, to_path=fallback)
+                return
+            except Exception as e2:
+                logger.warning("metrics_write_fallback_failed", error=str(e2), fallback=fallback)
+        # Any other error or fallback failed
         logger.warning("metrics_write_failed", error=str(e), path=path)
 
 # ---- span helper -------------------------------------------------------------
