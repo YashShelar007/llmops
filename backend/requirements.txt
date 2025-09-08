@@ -8,5 +8,8 @@ structlog>=24.1.0
 PyYAML>=6.0.1
 matplotlib>=3.8.0
 langfuse>=2.43.1
+openai>=1.45.0
+tiktoken>=0.7.0
+mangum>=0.17.0
 # Optional: enable when using real Langfuse + provider SDKs
 # openai>=1.43.0

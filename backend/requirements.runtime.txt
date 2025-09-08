@@ -1,0 +1,12 @@
+fastapi>=0.112.0
+pydantic>=2.7.0
+httpx>=0.27.0
+python-dotenv>=1.0.1
+structlog>=24.1.0
+PyYAML>=6.0.1
+langfuse[otlp]>=3.3.4
+opentelemetry-api>=1.26.0
+opentelemetry-sdk>=1.26.0
+opentelemetry-exporter-otlp-proto-http>=1.26.0
+openai>=1.45.0
+mangum>=0.17.0
