@@ -61,11 +61,6 @@ jobs:
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "${DIGEST}" > image.txt
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
       - name: Terraform init
         working-directory: infra/terraform
         run: terraform init -input=false
