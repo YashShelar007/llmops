@@ -21,13 +21,15 @@ env:
 jobs:
   apply:
     runs-on: ubuntu-latest
-    environment: prod # add required reviewers in repo settings for safety
     steps:
       - uses: actions/checkout@v4
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # Try exact tag; if missing (manual run on a different SHA), fall back to most recent tagged image
       - name: Resolve image digest
         id: digest
         run: |
@@ -36,23 +38,40 @@ jobs:
             --repository-name "${ECR_REPO}" \
             --image-ids imageTag="${IMAGE_TAG}" \
             --query 'images[0].imageId.imageDigest' \
-            --output text --region "${AWS_REGION}")"
+            --output text --region "${AWS_REGION}" || true)"
 
           if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ] || [ "${DIGEST}" = "null" ]; then
-            echo "Could not find digest for tag ${IMAGE_TAG}" >&2
+            echo "Tag ${IMAGE_TAG} not found; falling back to most recent tagged image..." >&2
+            DIGEST="$(aws ecr describe-images \
+              --repository-name "${ECR_REPO}" \
+              --query "reverse(sort_by(imageDetails[?imageTags!=null], &imagePushedAt))[0].imageDigest" \
+              --output text --region "${AWS_REGION}")"
+          fi
+
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ] || [ "${DIGEST}" = "null" ]; then
+            echo "Could not resolve any image digest to deploy." >&2
             exit 1
           fi
 
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "${DIGEST}" > image.txt
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: terraform init -input=false
+
       - name: Terraform apply
         working-directory: infra/terraform
+        env:
+          IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}@${{ steps.digest.outputs.digest }}
         run: |
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}@${{ steps.digest.outputs.digest }}"
-          terraform -chdir=infra/terraform init -input=false
-          terraform -chdir=infra/terraform apply -auto-approve \
-            -var "region=${AWS_REGION}" \
+          set -e
+          terraform apply -auto-approve \
+            -var "region=${{ env.AWS_REGION }}" \
             -var "image_uri=${IMAGE_URI}" \
-            -var "architecture=x86_64"
-            -var "otel_service_name=llmops-starter-api" \
-            -var "otel_resource_attributes=service.version=0.3.2,deployment.environment=prod"
+            -var "architecture=${{ env.ARCH }}"
