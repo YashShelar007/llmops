@@ -31,21 +31,28 @@ jobs:
       - name: Resolve image digest
         id: digest
         run: |
-          DIGEST=$(aws ecr describe-images --repository-name "${ECR_REPO}" \
-            --query "imageDetails[?contains(imageTags, '${IMAGE_TAG}')]|[0].imageDigest" \
-            --output text --region "${AWS_REGION}")
-          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ] || [ "$DIGEST" = "null" ]; then
-            echo "No digest found for tag ${IMAGE_TAG}"; exit 1
+          set -euo pipefail
+          DIGEST="$(aws ecr batch-get-image \
+            --repository-name "${ECR_REPO}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'images[0].imageId.imageDigest' \
+            --output text --region "${AWS_REGION}")"
+
+          if [ -z "${DIGEST}" ] || [ "${DIGEST}" = "None" ] || [ "${DIGEST}" = "null" ]; then
+            echo "Could not find digest for tag ${IMAGE_TAG}" >&2
+            exit 1
           fi
+
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "${DIGEST}" > image.txt
       - name: Terraform apply
         working-directory: infra/terraform
         run: |
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}@${{ steps.digest.outputs.digest }}"
-          terraform init -input=false
-          terraform apply -auto-approve \
+          terraform -chdir=infra/terraform init -input=false
+          terraform -chdir=infra/terraform apply -auto-approve \
             -var "region=${AWS_REGION}" \
             -var "image_uri=${IMAGE_URI}" \
-            -var "architecture=${ARCH}" \
+            -var "architecture=x86_64"
             -var "otel_service_name=llmops-starter-api" \
             -var "otel_resource_attributes=service.version=0.3.2,deployment.environment=prod"
