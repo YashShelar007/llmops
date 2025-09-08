@@ -11,7 +11,7 @@
         margin: 24px;
       }
       .card {
-        max-width: 800px;
+        max-width: 880px;
         border: 1px solid #ddd;
         border-radius: 12px;
         padding: 16px;
@@ -19,6 +19,13 @@
       textarea {
         width: 100%;
         height: 120px;
+      }
+      input[type="text"],
+      input[type="password"] {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 8px;
       }
       button {
         padding: 8px 14px;
@@ -38,9 +45,25 @@
         gap: 12px;
         align-items: center;
       }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
       .muted {
         color: #666;
         font-size: 12px;
+      }
+      label {
+        font-size: 12px;
+        color: #444;
+        display: block;
+        margin-bottom: 4px;
+      }
+      .sep {
+        height: 1px;
+        background: #eee;
+        margin: 14px 0;
       }
     </style>
   </head>
@@ -52,44 +75,93 @@
         trace ID.
       </p>
 
-      <p class="muted">
-        Tip: You can open this UI directly at
-        <code>http://localhost:8000/ui/index.html</code> (served by FastAPI) to
-        avoid live-reload flicker.
-      </p>
+      <div class="grid">
+        <div>
+          <label for="apiBase">API base URL</label>
+          <input
+            id="apiBase"
+            type="text"
+            placeholder="https://xxxxx.execute-api.us-east-1.amazonaws.com"
+          />
+          <div class="muted">
+            Local dev can be left blank (defaults to
+            <code>window.location.origin</code>).
+          </div>
+        </div>
+        <div>
+          <label for="apiKey">X-API-Key</label>
+          <input
+            id="apiKey"
+            type="password"
+            placeholder="Paste demo key (optional locally)"
+          />
+          <div class="muted">
+            Required when calling the API Gateway you secured.
+          </div>
+        </div>
+      </div>
+
+      <div class="sep"></div>
 
       <textarea id="query" placeholder="Ask something..."></textarea>
       <div class="row">
         <button id="send">Send</button>
         <span id="status"></span>
       </div>
+
       <h3>Response</h3>
       <pre id="out">(waiting)</pre>
+
+      <p class="muted">
+        Tip: In local dev, open this at <code>/ui/index.html</code> (FastAPI
+        serves it). When hosted on S3/CloudFront, set the API base to your API
+        Gateway URL and paste the demo API key.
+      </p>
     </div>
 
     <script>
-      const API_BASE = "http://localhost:8000"; // same-origin if you use /ui
       const out = document.getElementById("out");
       const statusEl = document.getElementById("status");
       const qEl = document.getElementById("query");
+      const apiBaseEl = document.getElementById("apiBase");
+      const apiKeyEl = document.getElementById("apiKey");
 
-      // Restore last response so a reload doesn't wipe it
-      const LAST_KEY = "llmops-starter:last";
-      const last = localStorage.getItem(LAST_KEY);
-      if (last) {
-        try {
-          const obj = JSON.parse(last);
-          if (obj.query) qEl.value = obj.query;
-          if (obj.json) {
-            out.textContent =
-              JSON.stringify(obj.json, null, 2) +
-              (obj.json?.trace?.guardrail
-                ? `\n\n(guardrail: ${obj.json.trace.guardrail})`
-                : "");
-            statusEl.textContent = "restored";
-          }
-        } catch {}
-      }
+      const SETTINGS = "llmops-starter:ui-settings";
+      const LAST = "llmops-starter:last";
+
+      // Load saved settings
+      try {
+        const s = JSON.parse(localStorage.getItem(SETTINGS) || "{}");
+        if (s.apiBase) apiBaseEl.value = s.apiBase;
+        if (s.apiKey) apiKeyEl.value = s.apiKey;
+      } catch {}
+
+      // Restore last response
+      try {
+        const last = JSON.parse(localStorage.getItem(LAST) || "null");
+        if (last?.query) qEl.value = last.query;
+        if (last?.json) {
+          out.textContent =
+            JSON.stringify(last.json, null, 2) +
+            (last.json?.trace?.guardrail
+              ? `\n\n(guardrail: ${last.json.trace.guardrail})`
+              : "");
+          statusEl.textContent = "restored";
+        }
+      } catch {}
+
+      // Persist settings on blur
+      const saveSettings = () => {
+        localStorage.setItem(
+          SETTINGS,
+          JSON.stringify({
+            apiBase: apiBaseEl.value.trim(),
+            apiKey: apiKeyEl.value.trim(),
+          })
+        );
+      };
+      apiBaseEl.addEventListener("blur", saveSettings);
+      apiKeyEl.addEventListener("blur", saveSettings);
 
       document.getElementById("send").onclick = async () => {
         const query = qEl.value.trim();
@@ -98,15 +170,24 @@
           return;
         }
 
-        statusEl.textContent = "Calling /answer...";
-        // Keep previous output visible; do not overwrite with (waiting)
+        // Default API base to window.location.origin for local FastAPI (/ui)
+        const apiBase = (
+          apiBaseEl.value.trim() || window.location.origin
+        ).replace(/\/+$/, "");
+        const apiKey = apiKeyEl.value.trim();
+
+        statusEl.textContent = `POST ${apiBase}/answer ...`;
 
         try {
-          const res = await fetch(`${API_BASE}/answer`, {
+          const headers = { "Content-Type": "application/json" };
+          if (apiKey) headers["X-API-Key"] = apiKey;
+
+          const res = await fetch(`${apiBase}/answer`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers,
             body: JSON.stringify({ query }),
           });
+
           const json = await res.json();
           statusEl.textContent = res.ok ? "OK" : `Error ${res.status}`;
           out.textContent =
@@ -114,8 +195,9 @@
             (json?.trace?.guardrail
               ? `\n\n(guardrail: ${json.trace.guardrail})`
               : "");
-          // Persist so auto-reloads (if any) restore immediately
-          localStorage.setItem(LAST_KEY, JSON.stringify({ query, json }));
+
+          localStorage.setItem(LAST, JSON.stringify({ query, json }));
+          saveSettings();
         } catch (e) {
           statusEl.textContent = "Network error";
           out.textContent = String(e);

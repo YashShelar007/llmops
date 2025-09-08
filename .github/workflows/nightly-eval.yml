@@ -1,0 +1,23 @@
+name: nightly-eval
+on:
+  schedule:
+    - cron: "17 9 * * *" # daily ~02:17 PT
+  workflow_dispatch: {}
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /answer
+        env:
+          API: ${{ vars.API_BASE_URL }}
+          KEY: ${{ secrets.DEMO_API_KEY }}
+        run: |
+          curl -sS -X POST "$API/answer" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $KEY" \
+            -d '{"query":"Nightly health: say OK."}' | tee result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-result
+          path: result.json
