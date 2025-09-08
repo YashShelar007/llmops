@@ -42,14 +42,10 @@ jobs:
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:main
           provenance: false
           sbom: false
-      - name: Capture digest
-        id: digest
+      - name: Capture digest from buildx output
         run: |
-          DIGEST=$(aws ecr describe-images --repository-name "${ECR_REPO}" \
-            --query "imageDetails[?contains(imageTags, '${IMAGE_TAG}')]|[0].imageDigest" \
-            --output text --region "${AWS_REGION}")
-          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "${DIGEST}" > image.txt
+          echo "digest=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+        echo "${{ steps.build.outputs.digest }}" > image.txt   
       - uses: actions/upload-artifact@v4
         with:
           name: image-digest
