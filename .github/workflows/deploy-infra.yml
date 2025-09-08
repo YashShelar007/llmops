@@ -29,7 +29,12 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Try exact tag; if missing (manual run on a different SHA), fall back to most recent tagged image
+      - name: Set up Terraform 1.5.7
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+          terraform_wrapper: false
+
       - name: Resolve image digest
         id: digest
         run: |
