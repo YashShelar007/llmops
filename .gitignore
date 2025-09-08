@@ -30,3 +30,8 @@ yarn-error.log*
 metrics.jsonl
 data/*.jsonl
 out.png
+
+# terraform
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate
+infra/terraform/terraform.tfstate.*
