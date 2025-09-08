@@ -6,6 +6,60 @@ resource "aws_cloudwatch_log_group" "fn" {
   retention_in_days = var.log_retention_days
 }
 
+# Allow Lambda to read SSM params (SecureString) encrypted with AWS-managed SSM key
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
+
+# Policy to read only our namespace (least privilege)
+data "aws_iam_policy_document" "ssm_access" {
+  statement {
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_namespace}/*"
+    ]
+  }
+  statement {
+    actions   = ["kms:Decrypt"]
+    resources = ["arn:${data.aws_partition.current.partition}:kms:${var.region}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"]
+  }
+}
+
+resource "aws_iam_policy" "ssm_access" {
+  name   = "${var.function_name}-ssm-access"
+  policy = data.aws_iam_policy_document.ssm_access.json
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_access" {
+  role       = aws_iam_role.fn.name
+  policy_arn = aws_iam_policy.ssm_access.arn
+}
+
+# --- CloudWatch alarms ---
+resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
+  alarm_name          = "${var.function_name}-errors"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 1
+  dimensions = { FunctionName = var.function_name }
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_duration_p95" {
+  alarm_name          = "${var.function_name}-duration-p95"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Duration"
+  namespace           = "AWS/Lambda"
+  period              = 300
+  extended_statistic  = "p95"
+  threshold           = 4000  # 4s p95
+  dimensions = { FunctionName = var.function_name }
+}
+
+
 # IAM role for Lambda
 data "aws_iam_policy_document" "assume" {
   statement {
