@@ -178,7 +178,7 @@ aws iam create-role --role-name gha-llmops-deployer \
 
 ## Status
 
-Built in 2025 as a starter project. Maintained lightly; no active development.
+Built in 2025 as a starter project.
 
 ## License
 
