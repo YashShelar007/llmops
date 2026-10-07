@@ -1,86 +1,65 @@
-# LLMOps Starter
+# llmops
 
-Production-flavored LLM answering service that fits on a slide:
+A small FastAPI service that answers a question with an LLM and returns latency, token count, cost and a trace ID with every answer. It is a reference deployment for people who want to see one LLM endpoint wired end to end on AWS: Lambda behind API Gateway, Terraform for the infra, GitHub Actions for deploys, Langfuse and CloudWatch for observability.
 
-**S3 (UI)** → **API Gateway (HTTP)** → **Lambda (container) + FastAPI** → **OpenAI**
-**Observability**: CloudWatch (structured JSON) + Langfuse v3 (OTel)
-**Config/Secrets**: Env vars + SSM Parameter Store
-**IaC/CI/CD**: Terraform + GitHub Actions (OIDC, no long-lived AWS keys)
+Request path: S3 static page, API Gateway (HTTP), Lambda container running FastAPI via Mangum, then OpenAI.
 
----
+## What it does not do
 
-## Features
+- Only OpenAI is implemented, plus a canned mock provider for tests. The provider switch is one function, but no other vendor is wired in.
+- Auth is a single shared API key checked against one header. There are no users, quotas or rate limits.
+- Cost is a placeholder: the OpenAI path multiplies total tokens by a flat `0.000001`, not by real model pricing.
+- The eval harness is a keyword check against three questions. It is a wiring example, not a quality gate.
+- Metrics are written to a local JSONL file, which on Lambda lives in `/tmp` and is lost on cold start.
 
-* FastAPI backend (containerized) deployed to **AWS Lambda** behind **API Gateway**
-* **OpenAI** provider (pluggable client), token & cost accounting per request
-* **Langfuse v3** tracing (OpenTelemetry) + structured **CloudWatch** logs
-* **API key** check (value stored in **SSM**) for a simple but real auth story
-* Static **UI** hosted on **S3 website** with CORS to the API
-* **Terraform** for Lambda, API GW, CORS, S3 website, alarms/logs
-* **GitHub Actions**: build & push to ECR, deploy via Terraform, nightly eval
-* Eval harness + golden set (kept simple but wiring is there)
+## Quickstart
 
----
-
-## Repo Layout
-
-```
-backend/
-  app/
-    __init__.py          # SSM/env helpers, wiring
-    main.py              # FastAPI + Mangum
-    llm_client.py        # provider abstraction (OpenAI + mock)
-    observability.py     # structlog + Langfuse v3 helpers
-  requirements.txt
-  Dockerfile.lambda
-frontend/
-  index.html             # Simple demo UI
-infra/
-  terraform/
-    main.tf, variables.tf, outputs.tf, versions.tf
-scripts/
-  iam/gha-oidc-trust.json
-.github/workflows/
-  ci.yml                 # local mock tests, eval harness
-  build-and-push.yml     # buildx -> ECR (amd64)
-  deploy-infra.yml       # resolve digest -> terraform apply
-  nightly-eval.yml       # scheduled live check
-```
-
----
-
-## Quickstart (Local Dev)
+Runs locally with the mock provider, no keys needed. Verified on Python 3.13 on macOS (2026-10-07).
 
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Minimal env (use your own key)
-export LLM_PROVIDER=openai
-export OPENAI_API_KEY=sk-...
-# Optional Langfuse
-# export LANGFUSE_PUBLIC_KEY=pk_...
-# export LANGFUSE_SECRET_KEY=sk_...
-# export LANGFUSE_HOST=https://us.cloud.langfuse.com
-
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+LLM_PROVIDER=mock uvicorn app.main:app --port 8000
 ```
 
-Endpoints:
+In another terminal:
 
-* `GET /health`
-* `POST /answer` with body `{"query":"Hello"}`
+```bash
+curl -s localhost:8000/health
+curl -s -X POST localhost:8000/answer -H 'content-type: application/json' \
+  -d '{"query":"What is the capital of France?"}'
+python eval/harness.py     # run from the repo root; needs the server on :8000
+```
 
-UI (served locally): open `frontend/index.html` and set API base to `http://localhost:8000`.
+With the mock provider all three golden-set questions pass. To use OpenAI, set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` (see `.env.example`). Not verified: the OpenAI path, Langfuse export, and `docker compose` in `infra/` (it expects a `.env` file at the repo root).
 
----
+Endpoints: `GET /health`, `POST /answer` (body `{"query": "...", "user_id": "optional"}`), `GET /metrics` (last N rows of the metrics file), and the demo page at `/ui`.
 
-## Deploy to AWS (manual, fastest path)
+## How it works
 
-**Prereqs:** AWS CLI, Terraform, Docker Buildx, `jq`.
+`POST /answer` checks the `X-API-Key` header if a `DEMO_API_KEY` is configured, then calls the LLM client inside a tracing span. The client retries with jittered exponential backoff (default 2 retries, 8 second timeout).
 
-1. **Build & push image** (amd64 is important for Lambda):
+There is a small guardrail ladder. If the answer is empty or under three characters, the request is retried once with the query trimmed to 200 characters. If that also fails, or the provider raises, the caller gets a fixed "could you rephrase" message. The `guardrail` field in the response says which path was taken: `none`, `trimmed` or `fallback`.
+
+Each request produces a structured JSON log line (structlog), one row in the metrics file, and, when `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST` are all set, a Langfuse v3 trace over OpenTelemetry. The response carries both an app-level `request_id` and the Langfuse trace ID so the two can be joined.
+
+Secrets can come from environment variables or from SSM Parameter Store: if `OPENAI_API_KEY` is unset and `SSM_OPENAI_API_KEY` names a parameter, it is fetched at import time. The same pattern covers the Langfuse keys and `DEMO_API_KEY`.
+
+```
+backend/app/       main.py (FastAPI), llm_client.py, observability.py, lambda_handler.py
+eval/              golden_set.yaml, harness.py
+frontend/          index.html (demo page)
+infra/terraform/   Lambda, API Gateway, S3 website, CloudWatch alarms, SSM access
+infra/docker-compose.yml
+scripts/           dev_api.sh, plot_metrics.py, iam/gha-oidc-trust.json
+.github/workflows/ ci, build-and-push, deploy-infra, deploy-ui, nightly-eval
+```
+
+## Deploying to AWS
+
+Not verified: none of this was re-run in the 2026-10 cleanup. It needs the AWS CLI, Terraform, Docker Buildx and `jq`. Build for linux/amd64, push to ECR, deploy the image by digest.
+
 
 ```bash
 REGION=us-east-1
@@ -155,101 +134,52 @@ curl -sS -X POST "${API_BASE}/answer" \
   -d '{"query":"Explain what an API is in one sentence."}' | jq
 ```
 
----
 
-## CI/CD (GitHub Actions)
+## CI/CD
 
-**What it does**
+- `ci.yml`: starts the API with the mock provider and runs `eval/harness.py`; fails if any line says FAIL.
+- `build-and-push.yml`: OIDC login, buildx for linux/amd64, push to ECR, capture the digest.
+- `deploy-infra.yml`: resolve the image digest, then `terraform apply`.
+- `deploy-ui.yml`: manual run that syncs `frontend/` to the S3 bucket named by the `UI_BUCKET` variable.
+- `nightly-eval.yml`: one live call to `/answer` with the demo key, result kept as an artifact.
 
-* `build-and-push.yml`: OIDC → ECR login → buildx (linux/amd64) → push → capture digest
-* `deploy-infra.yml`: OIDC → resolve digest by tag (or use build output) → `terraform apply`
-* `ci.yml`: local mock provider tests + eval harness (no spend)
-* `nightly-eval.yml`: scheduled live call using the demo API key
+Repository variables used: `AWS_REGION`, `AWS_ACCOUNT_ID`, `ECR_REPO`, `AWS_ROLE_TO_ASSUME`, `API_BASE_URL`, `UI_BUCKET`. Secrets: `DEMO_API_KEY`, optionally `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`.
 
-**Repo → Settings → Variables (plain):**
-
-* `AWS_REGION` = `us-east-1`
-* `AWS_ACCOUNT_ID` = your account
-* `ECR_REPO` = `llmops-starter`
-* `AWS_ROLE_TO_ASSUME` = `arn:aws:iam::<account>:role/gha-llmops-deployer`
-
-**Repo → Settings → Secrets (encrypted):**
-
-* *(optional for CI logs)* `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`
-* *(for nightly-eval)* `DEMO_API_KEY` = value of `/llmops-starter/demo_api_key`
-
-**OIDC role (one-time in AWS):**
-
-* Edit `scripts/iam/gha-oidc-trust.json` → replace:
-
-  * `<ACCOUNT_ID>` with your account
-  * `<OWNER>/<REPO>` with your GitHub `owner/repo`
-* Create role & attach policy (start with admin for speed; scope later):
+For the deploy role, edit `scripts/iam/gha-oidc-trust.json` so the account ID and the `repo:<owner>/<repo>:*` subject match your own, then create the role. Attach a policy scoped to ECR, Lambda, API Gateway, S3, IAM and CloudWatch for this stack; `AdministratorAccess` works but is far too broad to leave in place.
 
 ```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ROLE_NAME=gha-llmops-deployer
-aws iam create-role --role-name "$ROLE_NAME" \
+aws iam create-role --role-name gha-llmops-deployer \
   --assume-role-policy-document file://scripts/iam/gha-oidc-trust.json
-aws iam attach-role-policy --role-name "$ROLE_NAME" \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-echo "Role ARN: arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 ```
 
-> If Actions fails with *“No OpenIDConnect provider found…”*: create the OIDC provider
-> `token.actions.githubusercontent.com` in IAM, then re-run.
+## Configuration
 
----
+- `LLM_PROVIDER`: `mock` (default) or `openai`.
+- `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-4o-mini`), `OPENAI_MAX_TOKENS` (300), `OPENAI_TIMEOUT_S` (8).
+- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`: optional tracing.
+- `DEMO_API_KEY`: if set, `/answer` requires it in `X-API-Key`.
+- `METRICS_LOG`: metrics file path (`./metrics.jsonl`, or `/tmp/metrics.jsonl` on Lambda).
+- `LLM_MOCK_FAIL_FIRST=true`: make the mock fail once, to exercise retries.
 
-## Demo Script (what to show the execs)
+## Problems hit while building it
 
-1. **UI (S3 website)** → paste `API_BASE` and the **demo API key** → ask a one-sentence “What is an API?”
-   Call out: **latency, tokens, cost, guardrail, lf\_trace\_id** in the response JSON.
-2. **Langfuse** → search by `lf_trace_id` → show input/output/tokens/cost, OTel resource attrs (service name/version/environment).
-3. **CloudWatch logs** (or `aws logs tail`) → show the same `trace_id` & `lf_trace_id` in structured JSON.
-4. **Security**: clear the API key and retry to show request rejection.
-5. **Infra** (brief): show TF files for Lambda/API GW/S3 website/CORS/alarms; explain that deploys are **by digest**, so rollbacks are instant.
+- Lambda rejected the image with "UnsupportedImageLayerDetected" or "InvalidImage": build for linux/amd64, disable provenance and SBOM, push with OCI media types off, and deploy by digest.
+- S3 website policy returned AccessDenied: the account-level public access block has to allow public policies. The Terraform sets this.
+- GitHub Actions failed with "No OpenIDConnect provider found": create the `token.actions.githubusercontent.com` provider in IAM first.
+- Digest lookup returned null: use `aws ecr batch-get-image --image-ids imageTag=... --query 'images[0].imageId.imageDigest'`, or take the digest from the build step output.
+- Langfuse rejected `.end(output=...)`: call `.update(output=...)` before closing the span, then `flush()`.
 
----
+## Known limits
 
-## Configuration & Secrets
+- CORS is `*` with credentials enabled in `backend/app/main.py`. Fine for a demo, wrong for anything with real users.
+- `GET /metrics` is not behind the API key.
+- No unit tests. The only automated check is the eval harness in CI.
+- Not done: CloudFront and TLS for the UI, JWT auth, provisioned concurrency, a CloudWatch dashboard.
 
-* **Provider**: `LLM_PROVIDER=openai` (default), or `mock` for CI.
-* **OpenAI**: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-4o-mini`)
-* **Langfuse** (optional): `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`
-* **Demo API key**: stored in SSM `/llmops-starter/demo_api_key` and checked by the backend.
-* **Metrics file**: defaults to `METRICS_LOG=/tmp/metrics.jsonl` on Lambda (ephemeral; clears on cold start).
+## Status
 
----
-
-## Troubleshooting (real issues we solved)
-
-* **Lambda “UnsupportedImageLayerDetected” / “InvalidImage”**
-  Build **linux/amd64**, disable provenance/SBOM, and push **OCI media types false**. Deploy **by digest**.
-* **S3 website policy AccessDenied (BlockPublicPolicy)**
-  Ensure the bucket’s Public Access Block allows public policy for website read; TF module sets this.
-* **OIDC “No OpenIDConnect provider found”**
-  Create the `token.actions.githubusercontent.com` OIDC provider and use the correct trust JSON (repo-scoped).
-* **Digest lookup returns null**
-  Prefer `aws ecr batch-get-image --image-ids imageTag=... --query 'images[0].imageId.imageDigest'`.
-  Or capture `${{ steps.build.outputs.digest }}` directly in the build workflow.
-* **Write to ./metrics.jsonl fails on Lambda**
-  Use `/tmp/metrics.jsonl` or set `METRICS_LOG=/tmp/metrics.jsonl`.
-* **Langfuse `.end(output=...)` error**
-  Use `.update(output=...)` before closing the span; then `flush()`.
-
----
-
-## Roadmap / nice-to-haves
-
-* CloudFront + TLS + custom domain for the UI
-* JWT auth (Cognito/Auth0) or API GW usage plans
-* Provisioned Concurrency (1) to kill cold starts in demos
-* CloudWatch dashboard + Slack alerts
-* Larger eval set & quality gates
-
----
+Built in 2025 as a starter project. Maintained lightly; no active development.
 
 ## License
 
-MIT
+MIT. See `LICENSE`.
